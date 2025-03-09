@@ -1,14 +1,15 @@
 import { User } from "../models/User.model.js";
-import { EMAIL_REGEX, SELLER_WALLET_ARRAY_INDEX, BUYER_WALLET_ARRAY_INDEX } from "../constants.js";
+import {
+    EMAIL_REGEX,
+    SELLER_WALLET_ARRAY_INDEX,
+    BUYER_WALLET_ARRAY_INDEX,
+    WALLET_ADDRESS_INDEX,
+    ENCRYPTED_PRIVATE_KEY_INDEX
+} from "../constants.js";
 import { ApiError } from "../utils/ApiError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
-
-// TODO: allow registration with same email and username for different role types, i.e.,
-// buyer and seller
-// also allow loging for a direct roletype (i.e., as buyer or seller, and if neither specified,
-// then request is for logging in as venueManager or verifier
-// handle this case
+import { createWalletAddress } from "../utils/createNewWalletAddress.js";
 
 const generateAccessToken = async (userId) => {
     try {
@@ -22,7 +23,7 @@ const generateAccessToken = async (userId) => {
             }
         );
 
-        return { accessToken };
+        return accessToken;
     } catch (error) {
         throw new ApiError(500, "Failed to generate token!");
     }
@@ -31,7 +32,7 @@ const generateAccessToken = async (userId) => {
 const registerUser = asyncHandler( async (req, res) => {
     // get user details from request from frontend
     const { fullName, email, username, password } = req.body;
-    let { role } = req.body;
+    let { role = "buyer" } = req.body; // if no role is provided, default to buyer
 
     // validate user details
     if (
@@ -42,14 +43,6 @@ const registerUser = asyncHandler( async (req, res) => {
 
     if (!EMAIL_REGEX.test(email)) {
         throw new ApiError(400, "Please provide a valid email address!");
-    }
-
-    if (role) {
-        if (["buyer", "seller"].includes(role)) {
-            // create wallet IDs here
-        }
-    } else {
-        throw new ApiError(400, "Please select user type!");
     }
 
     // check if user already exists using both username and email
@@ -65,11 +58,64 @@ const registerUser = asyncHandler( async (req, res) => {
     });
 
     if (duplicateUser) {
-        throw new ApiError(409, "User with this email or username already exists");
+        if (duplicateUser.role === role) {
+            throw new ApiError(409, "User with this email or username already exists");
+        } else if (role === "verifier" || role === "venueManager") {
+            throw new ApiError(409, "You need to use a different email or username to create this account");
+        } else {
+            if (role === "buyer") {
+                if (duplicateUser.role === "seller") {
+                    const [ buyerWalletAddress, encryptedPrivateKey ] = await createWalletAddress();
+                    duplicateUser.attachedWallets[BUYER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX] = buyerWalletAddress;
+                    duplicateUser.attachedWallets[BUYER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX] = encryptedPrivateKey;
+                    duplicateUser.walletId = buyerWalletAddress;
+                    duplicateUser.encryptedPrivateKey = encryptedPrivateKey;
+                    duplicateUser.role = role;
+                } else {
+                    throw new ApiError(409, "You need to use a different email and username to create this account");
+                }
+            } else {
+                if (duplicateUser.role === "buyer") {
+                    const [ sellerWalletAddress, encryptedPrivateKey ] = await createWalletAddress();
+                    duplicateUser.attachedWallets[SELLER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX] = sellerWalletAddress;
+                    duplicateUser.attachedWallets[SELLER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX] = encryptedPrivateKey;
+                    duplicateUser.walletId = sellerWalletAddress;
+                    duplicateUser.encryptedPrivateKey = encryptedPrivateKey;
+                    duplicateUser.role = role;
+                } else {
+                    throw new ApiError(409, "You need to use a different email and username to create this account");
+                }
+            }
+
+            return res
+                .status(201)
+                .json(
+                    new ApiResponse(
+                        200,
+                        duplicateUser,
+                        "User registered successfully!"
+                    )
+                );
+        }
     }
 
-    if (!role) {
-        role = "buyer";
+    let walletAddress = null;
+    let encryptedPrivateKey = null;
+    let attachedWallets = [
+        [
+            null,
+            null
+        ],
+        [
+            null,
+            null
+        ]
+    ];
+
+    if (["buyer", "seller"].includes(role)) {
+        [ walletAddress, encryptedPrivateKey] = await createWalletAddress();
+    } else {
+        throw new ApiError(400, "Please select user type!");
     }
 
     // create user object and save it to db
@@ -77,12 +123,41 @@ const registerUser = asyncHandler( async (req, res) => {
         fullName,
         email,
         password,
-        username: username.toLowerCase()
+        username: username.toLowerCase(),
+        attachedWallets
     });
 
-    // remove password and refresh token field from response
+    if (role === "buyer") {
+        user.attachedWallets[BUYER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX] = walletAddress;
+        user.attachedWallets[BUYER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX] = encryptedPrivateKey;
+        user.encryptedPrivateKey = encryptedPrivateKey;
+        user.walletId = walletAddress;
+    } else if (role === "seller") {
+        user.attachedWallets[SELLER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX] = walletAddress;
+        user.attachedWallets[SELLER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX] = encryptedPrivateKey;
+        user.encryptedPrivateKey = encryptedPrivateKey;
+        user.walletId = walletAddress;
+    } else {
+        user.attachedWallets = [
+            [
+                null,
+                null
+            ],
+            [
+                null,
+                null
+            ]
+        ];
+        user.walletId = null;
+        user.encryptedPrivateKey = null;
+    }
+
+    user.role = role;
+
+    await user.save();
+
     const userCreated = await User.findById(user._id).select(
-        "-password -refreshToken"
+        "-password"
     );
 
     // check if user was saved successfully by verifying received response
@@ -107,6 +182,8 @@ const loginUser = asyncHandler(async (req, res) => {
         username,
         password,
     } = req.body;
+
+    let { role } = req.body;
 
     // username or email
     if (!email && !username) {
@@ -135,17 +212,29 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(401, "Password incorrect!");
     }
 
-    // generate access token and refresh token
-    const { accessToken, refreshToken } = await generateAccessToken(
+    // generate access token
+    const accessToken = await generateAccessToken(
         foundUser._id
     );
 
     // send response cookie with tokens
-    const loggedInUser = await User.findById(foundUser._id).select("-password -refreshToken");
+    const loggedInUser = await User.findById(foundUser._id).select("-password");
 
     const options = {
         httpOnly: true,
         secure: true
+    }
+
+    if (role && loggedInUser.role !== role) {
+        throw new ApiError(400, `Your account is not of type ${role}!`);
+    }
+
+    if (role === "buyer") {
+        loggedInUser.walletId = loggedInUser.attachedWallets[BUYER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX];
+        loggedInUser.encryptedPrivateKey = loggedInUser.attachedWallets[BUYER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX];
+    } else if (role === "seller") {
+        loggedInUser.walletId = loggedInUser.attachedWallets[SELLER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX];
+        loggedInUser.encryptedPrivateKey = loggedInUser.attachedWallets[SELLER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX];
     }
 
     return res
@@ -156,7 +245,6 @@ const loginUser = asyncHandler(async (req, res) => {
                 200,
                 {
                     user: loggedInUser,
-                    refreshToken,
                     accessToken
                 },
                 "User logged in successfully!"
@@ -293,7 +381,11 @@ const switchUserRole = asyncHandler( async (req, res) => {
     if (role === "seller") {
         if (req.user?.role === "buyer") {
             user = await setRole(req.user, role);
-            const sellerWallet = user.attachedWallets[SELLER_WALLET_ARRAY_INDEX];
+            const sellerWallet = user.attachedWallets[SELLER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX];
+            const encryptedPrivateKey = user.attachedWallets[SELLER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX];
+
+            user.walletId = sellerWallet;
+            user.encryptedPrivateKey = encryptedPrivateKey;
 
             if (!sellerWallet) {
                 throw new ApiError(400, "Please create a seller account first!");
@@ -304,7 +396,11 @@ const switchUserRole = asyncHandler( async (req, res) => {
     } else if (role === "buyer") {
         if (req.user?.role === "seller") {
             user = await setRole(req.user, role);
-            const buyerWallet = user.attachedWallets[BUYER_WALLET_ARRAY_INDEX];
+            const buyerWallet = user.attachedWallets[BUYER_WALLET_ARRAY_INDEX][WALLET_ADDRESS_INDEX];
+            const encryptedPrivateKey = user.attachedWallets[BUYER_WALLET_ARRAY_INDEX][ENCRYPTED_PRIVATE_KEY_INDEX];
+
+            user.walletId = buyerWallet;
+            user.encryptedPrivateKey = encryptedPrivateKey;
 
             if (!buyerWallet) {
                 throw new ApiError(400, "Please create a buyer account first!");

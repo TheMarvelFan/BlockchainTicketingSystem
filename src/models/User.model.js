@@ -58,11 +58,21 @@ const userSchema = new Schema(
             default: null
         },
         attachedWallets: [
-            {
-                type: String,
-                default: null
-            }
-        ]
+            [
+                {
+                    type: String, // wallet address
+                    default: null
+                },
+                {
+                    type: String, // encrypted private key
+                    default: null
+                }
+            ]
+        ],
+        encryptedPrivateKey: {
+            type: String,
+            default: null
+        }
     }, {
         timestamps: true,
     }
