@@ -3,10 +3,49 @@ import mongooseAggregatePaginate from "mongoose-aggregate-paginate-v2";
 
 const ticketSchema = new Schema(
     {
-        // we also need an image here because all tickets of an event will have the same art on them
-        // eventName (for which it is sold)
-        // eventStart and eventEnd time
-        // we also need a "used" label for the ticket
+        nftId: {
+            type: String,
+            required: true,
+            unique: true
+        },
+        walletId: {
+            type: String,
+            required: true
+        },
+        sold: {
+            type: Boolean,
+            default: false
+        },
+        used: {
+            type: Boolean,
+            default: false
+        },
+        eventId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Event",
+            required: true
+        },
+        venueId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Venue",
+            required: true
+        },
+        createdBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            required: true
+        },
+        boughtBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User"
+        },
+        price: {
+            type: Number,
+            required: true
+        },
+        metadata: {
+            type: Object
+        }
     },
     {
         timestamps: true

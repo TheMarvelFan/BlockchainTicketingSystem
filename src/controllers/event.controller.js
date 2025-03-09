@@ -5,6 +5,7 @@ import { Event } from "../models/Event.model.js";
 import { isValidObjectId } from "mongoose";
 import { Venue } from "../models/Venue.model.js";
 import { User } from "../models/User.model.js";
+import { Ticket } from "../models/Ticket.model.js";
 
 const getAllEvents = asyncHandler(async (req, res) => {
     const {
@@ -81,7 +82,63 @@ const getEventById = asyncHandler(async (req, res) => {
 });
 
 const bookEvent = asyncHandler(async (req, res) => {
+    try {
+        const { eventId, ticketId } = req.body;
+        const userId = req.user.id;
+        const buyerWalletId = req.user.walletAddress;
 
+        // Find the ticket
+        const ticket = await Ticket.findById(ticketId);
+
+        if (!ticket) {
+            throw new ApiError(404, "This ticket does not exist!");
+        }
+
+        if (ticket.sold) {
+            throw new ApiError(400, "Ticket has already been sold!");
+        }
+
+        // Verify event matches
+        if (ticket.eventId.toString() !== eventId) {
+            throw new ApiError(400, "Ticket does not match event!");
+        }
+
+        const web3 = getWeb3();
+        const ticketContract = getTicketContract();
+
+        // Buy ticket on blockchain
+        const priceWei = web3.utils.toWei(ticket.price.toString(), "ether");
+
+        const gasEstimate = await ticketContract.methods.buyTicket(ticket.nftId)
+            .estimateGas({
+                from: buyerWalletId,
+                value: priceWei
+            });
+
+        await ticketContract.methods.buyTicket(ticket.nftId)
+            .send({
+                from: buyerWalletId,
+                value: priceWei,
+                gas: Math.floor(gasEstimate * 1.1)
+            });
+
+        // Update ticket in database
+        ticket.sold = true;
+        ticket.walletId = buyerWalletId;
+        ticket.boughtBy = userId;
+        ticket.updatedAt = Date.now();
+
+        await ticket.save();
+
+        return res
+            .status(200)
+            .json(
+                new ApiResponse(200, ticket, "Ticket purchased successfully!")
+            );
+    } catch (error) {
+        console.error("Error purchasing ticket:", error);
+        throw new ApiError(500, "Error purchasing ticket");
+    }
 });
 
 const updateEvent = asyncHandler(async (req, res) => {
