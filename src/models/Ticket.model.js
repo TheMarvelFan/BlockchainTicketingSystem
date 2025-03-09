@@ -46,6 +46,8 @@ const ticketSchema = new Schema(
         metadata: {
             type: Object
         }
+        // add a label "burnedBy" to store the user who burned the ticket
+        // this will allow sellers and verifier to check the tickets that they have burned
     },
     {
         timestamps: true

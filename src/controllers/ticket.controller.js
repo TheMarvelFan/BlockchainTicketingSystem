@@ -4,23 +4,20 @@ import crypto from "crypto";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
+import { User } from "../models/User.model.js";
+import { isValidObjectId } from "mongoose";
 
 // OTP storage (should use a proper database in production)
 const otpStore = {};
-
-// Helper to check if user is the owner or creator of a ticket
-const isAuthorized = async (userId, ticketId) => {
-    const ticket = await Ticket.findById(ticketId);
-    return ticket && (ticket.createdBy.toString() === userId.toString() ||
-        (ticket.boughtBy && ticket.boughtBy.toString() === userId.toString()));
-};
 
 // Create a new ticket (mint)
 const createTicket = asyncHandler(async (req, res) => {
     try {
         const { price, eventId, venueId, tokenURI } = req.body;
-        const userId = req.user.id;
-        const walletId = req.user.walletAddress;
+        const userId = req.user._id;
+        const createdBy = await User.findById(userId);
+
+        const walletId = req.user.walletId;
 
         // Mint NFT on blockchain
         const ticketContract = getTicketContract();
@@ -53,7 +50,7 @@ const createTicket = asyncHandler(async (req, res) => {
             used: false,
             eventId,
             venueId,
-            createdBy: userId,
+            createdBy,
             price,
             metadata: {
                 tokenURI,
@@ -78,21 +75,79 @@ const createTicket = asyncHandler(async (req, res) => {
 const getTickets = asyncHandler(async (req, res) => {
     try {
         const userId = req.user._id;
-        let query = {};
+        const user = await User.findById(userId);
 
-        if (req.query.role === "seller") {
-            query.createdBy = userId;
-        } else if (req.query.role === "buyer") {
-            query.boughtBy = userId;
-        } else {
-            // If no role specified, show tickets they created or bought
-            query.$or = [{ createdBy: userId }, { boughtBy: userId }];
+        let {
+            query = "",
+            pageNumber = 1,
+            pageLimit = 10,
+            sortBy = "createdAt",
+            sortType = "desc",
+        } = req.query;
+
+        let filter = {};
+
+        if (query) {
+            filter.title = {
+                $regex: query,
+                $options: "i"
+            };
         }
 
-        const tickets = await Ticket.find(query)
-            .populate("eventId")
-            .populate("venueId")
-            .sort({ createdAt: -1 });
+        if (user.role === "seller") {
+            filter.createdBy = userId;
+        } else if (user.role === "buyer") {
+            filter.boughtBy = userId;
+        }
+
+        const aggregateQuery = Ticket.aggregate([
+            {
+                $match: filter
+            },
+            {
+                $lookup: {
+                    from: "events",
+                    localField: "eventId",
+                    foreignField: "_id",
+                    as: "eventId"
+                }
+            },
+            {
+                $unwind: {
+                    path: "$eventId",
+                    preserveNullAndEmptyArrays: true
+                }
+            }, // Unwind to get object instead of array
+            {
+                $lookup: {
+                    from: "venues", // Replace with the actual collection name for venues
+                    localField: "venueId",
+                    foreignField: "_id",
+                    as: "venueId"
+                }
+            },
+            {
+                $unwind: {
+                    path: "$venueId",
+                    preserveNullAndEmptyArrays: true
+                }
+            }, // Unwind to get object instead of array
+            {
+                $sort: {
+                    createdAt: -1
+                }
+            }
+        ]);
+
+        const options = {
+            page: pageNumber,
+            limit: pageLimit,
+            sort: {
+                [sortBy]: sortType === "desc" ? -1 : 1
+            }
+        };
+
+        const tickets = await Ticket.aggregatePaginate(aggregateQuery, options);
 
         return res
             .status(200)
@@ -106,21 +161,29 @@ const getTickets = asyncHandler(async (req, res) => {
 });
 
 // Get single ticket
-const getTicket = asyncHandler(async (req, res) => {
+const getTicketById = asyncHandler(async (req, res) => {
     try {
         const { ticketId } = req.params;
-        const userId = req.user._id;
 
-        const ticket = await Ticket.findById(ticketId)
-            .populate("eventId")
-            .populate("venueId");
+        if (!ticketId) {
+            throw new ApiError(400, "Ticket ID is required");
+        }
+
+        if (!isValidObjectId(ticketId)) {
+            throw new ApiError(400, "Invalid ticket ID");
+        }
+
+        const userId = req.user._id;
+        const user = await User.findById(userId);
+
+        const ticket = await Ticket.findById(ticketId);
 
         if (!ticket) {
             throw new ApiError(404, "Ticket not found");
         }
 
         // Check if user is authorized to view this ticket
-        if (!await isAuthorized(userId, ticketId)) {
+        if (ticket.boughtBy !== user && ticket.createdBy !== user) {
             throw new ApiError(403, "Not authorized to view this ticket");
         }
 
@@ -138,8 +201,17 @@ const getTicket = asyncHandler(async (req, res) => {
 // Update ticket details (only if owned)
 const updateTicket = asyncHandler(async (req, res) => {
     try {
-        const ticketId = req.params.ticketId;
-        const userId = req.user.id;
+        const { ticketId } = req.params;
+
+        if (!ticketId) {
+            throw new ApiError(400, "Ticket ID is required");
+        }
+
+        if (!isValidObjectId(ticketId)) {
+            throw new ApiError(400, "Invalid ticket ID");
+        }
+
+        const userId = req.user._id;
 
         const ticket = await Ticket.findById(ticketId);
 
@@ -148,12 +220,12 @@ const updateTicket = asyncHandler(async (req, res) => {
         }
 
         // Check if user is the creator and ticket is not sold yet
-        if (ticket.createdBy.toString() !== userId.toString() || ticket.sold) {
+        if (ticket.createdBy._id.toString() !== userId.toString() && !ticket.sold) {
             throw new ApiError(403, "Not authorized to update this ticket");
         }
 
         // Only allow updating certain fields
-        const updatableFields = ["metadata"];
+        const updatableFields = ["metadata", "price"];
         const updates = {};
 
         updatableFields.forEach(field => {
@@ -166,8 +238,13 @@ const updateTicket = asyncHandler(async (req, res) => {
 
         const updatedTicket = await Ticket.findByIdAndUpdate(
             ticketId,
-            { $set: updates },
-            { new: true, runValidators: true }
+            {
+                $set: updates
+            },
+            {
+                new: true,
+                runValidators: true
+            }
         );
 
         return res
@@ -185,7 +262,16 @@ const updateTicket = asyncHandler(async (req, res) => {
 const deleteTicket = asyncHandler(async (req, res) => {
     try {
         const ticketId = req.params.ticketId;
-        const userId = req.user.id;
+
+        if (!ticketId) {
+            throw new ApiError(400, "Ticket ID is required");
+        }
+
+        if (!isValidObjectId(ticketId)) {
+            throw new ApiError(400, "Invalid ticket ID");
+        }
+
+        const userId = req.user._id;
 
         const ticket = await Ticket.findById(ticketId);
 
@@ -194,16 +280,18 @@ const deleteTicket = asyncHandler(async (req, res) => {
         }
 
         // Check if user is the creator and ticket is not sold yet
-        if (ticket.createdBy.toString() !== userId.toString() || ticket.sold) {
+        if (ticket.createdBy._id.toString() !== userId.toString() || ticket.sold) {
             throw new ApiError(403, "Not authorized to delete this ticket");
         }
 
-        await Ticket.findByIdAndDelete(ticketId);
+        // also make sure that the ticket is removed from the chain
+
+        ticket.deleteOne();
 
         return res
             .status(200)
             .json(
-                new ApiResponse(200, null, "Ticket deleted successfully")
+                new ApiResponse(200, ticket, "Ticket deleted successfully")
             );
     } catch (error) {
         console.error("Error deleting ticket:", error);
@@ -214,18 +302,25 @@ const deleteTicket = asyncHandler(async (req, res) => {
 // Generate OTP and prepare for burn verification
 const prepareBurnTicket = asyncHandler(async (req, res) => {
     try {
+        // this route can be accessed only by buyer, but it must be initiated by the
+        // verifier or the seller
+        // note for improvement: add this layer of security
         const { ticketId } = req.params;
-        const userId = req.user.id;
+
+        if (!ticketId) {
+            throw new ApiError(400, "Ticket ID is required");
+        }
+
+        if (!isValidObjectId(ticketId)) {
+            throw new ApiError(400, "Invalid ticket ID");
+        }
+
+        const userId = req.user._id;
 
         const ticket = await Ticket.findById(ticketId);
 
         if (!ticket) {
             throw new ApiError(404, "Ticket not found");
-        }
-
-        // Verify user is authorized verifier
-        if (!req.user.isVerifier) {
-            throw new ApiError(403, "Not authorized to prepare burn verification");
         }
 
         // Generate OTP
@@ -262,10 +357,22 @@ const prepareBurnTicket = asyncHandler(async (req, res) => {
 // Burn ticket
 const burnTicket = asyncHandler(async (req, res) => {
     try {
+        // this route can be accessed only by buyer, but it must be initiated by the
+        // verifier or the seller
+        // note for improvement: add this layer of security
         const { ticketId } = req.params;
+
+        if (!ticketId) {
+            throw new ApiError(400, "Ticket ID is required");
+        }
+
+        if (!isValidObjectId(ticketId)) {
+            throw new ApiError(400, "Invalid ticket ID");
+        }
+
         const { otp } = req.body;
-        const userId = req.user.id;
-        const walletId = req.user.walletAddress;
+        const userId = req.user._id;
+        const walletId = req.user.walletId;
 
         const ticket = await Ticket.findById(ticketId);
 
@@ -311,19 +418,22 @@ const burnTicket = asyncHandler(async (req, res) => {
 const getBurnedTickets = asyncHandler(async (req, res) => {
     try {
         const userId = req.user._id;
-        let query = { used: true };
+        let query = {
+            used: true
+        };
 
-        if (req.user.isVerifier) {
+        if (req.user.role === "verifier" || req.user.role === "seller") {
             // Verifiers can see all burned tickets
+            // for this we need another label in the ticket model
+            // "burnedBy"
+            // which will be updated at some point in the above burnTicket method
+            // using that label we can query that here
         } else {
             // Regular users can only see their own burned tickets
             query.boughtBy = userId;
         }
 
-        const tickets = await Ticket.find(query)
-            .populate("eventId")
-            .populate("venueId")
-            .sort({ updatedAt: -1 });
+        const tickets = await Ticket.find(query);
 
         return res
             .status(200)
@@ -339,7 +449,7 @@ const getBurnedTickets = asyncHandler(async (req, res) => {
 export {
     createTicket,
     getTickets,
-    getTicket,
+    getTicketById,
     updateTicket,
     deleteTicket,
     prepareBurnTicket,

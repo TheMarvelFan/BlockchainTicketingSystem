@@ -1,8 +1,14 @@
 import { User } from "../models/User.model.js";
-import { EMAIL_REGEX } from "../constants.js";
+import { EMAIL_REGEX, SELLER_WALLET_ARRAY_INDEX, BUYER_WALLET_ARRAY_INDEX } from "../constants.js";
 import { ApiError } from "../utils/ApiError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+
+// TODO: allow registration with same email and username for different role types, i.e.,
+// buyer and seller
+// also allow loging for a direct roletype (i.e., as buyer or seller, and if neither specified,
+// then request is for logging in as venueManager or verifier
+// handle this case
 
 const generateAccessToken = async (userId) => {
     try {
@@ -96,7 +102,11 @@ const registerUser = asyncHandler( async (req, res) => {
 
 const loginUser = asyncHandler(async (req, res) => {
     // get user data from request
-    const { email, username, password } = req.body;
+    const {
+        email,
+        username,
+        password,
+    } = req.body;
 
     // username or email
     if (!email && !username) {
@@ -260,6 +270,10 @@ const updateAccountDetails = asyncHandler( async (req, res) => {
 const switchUserRole = asyncHandler( async (req, res) => {
     const { role } = req.body;
 
+    if (!["buyer", "seller"].includes(req.user?.role)) {
+        throw new ApiError(400, "Only buyers and sellers are allowed to switch roles!");
+    }
+
     if (!role) {
         throw new ApiError(400, "Please provide a role!");
     }
@@ -268,18 +282,50 @@ const switchUserRole = asyncHandler( async (req, res) => {
         throw new ApiError(400, "You can only switch between buyer and seller!");
     }
 
-    if (!["buyer", "seller"].includes(req.user?.role)) {
-        throw new ApiError(400, "Only buyers and sellers are allowed to switch roles!");
-    }
-
     // buyers and sellers cannot switch to venueManager or verifier
     // venueManagers and verifiers cannot switch to buyer or seller
     // the only switching allowed is between buyer and seller
     // when switching roles, the wallet ID is updated
     // buyer wallet is different from seller wallet for the same user
 
-    await User.findByIdAndUpdate(
-        req.user?._id,
+    let user;
+
+    if (role === "seller") {
+        if (req.user?.role === "buyer") {
+            user = await setRole(req.user, role);
+            const sellerWallet = user.attachedWallets[SELLER_WALLET_ARRAY_INDEX];
+
+            if (!sellerWallet) {
+                throw new ApiError(400, "Please create a seller account first!");
+            }
+        } else {
+            throw new ApiError(400, "You are already a seller!");
+        }
+    } else if (role === "buyer") {
+        if (req.user?.role === "seller") {
+            user = await setRole(req.user, role);
+            const buyerWallet = user.attachedWallets[BUYER_WALLET_ARRAY_INDEX];
+
+            if (!buyerWallet) {
+                throw new ApiError(400, "Please create a buyer account first!");
+            }
+        } else {
+            throw new ApiError(400, "You are already a buyer!");
+        }
+    }
+
+    req.user = user;
+
+    return res
+        .status(200)
+        .json(
+            new ApiResponse(200, user, "Role switched successfully!")
+        );
+});
+
+const setRole = async (user, role) => {
+    return User.findByIdAndUpdate(
+        user._id,
         {
             $set: {
                 role
@@ -288,8 +334,8 @@ const switchUserRole = asyncHandler( async (req, res) => {
         {
             new: true
         }
-    ).select("-password");
-});
+    );
+}
 
 export {
     registerUser,

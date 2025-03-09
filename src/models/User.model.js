@@ -52,6 +52,16 @@ const userSchema = new Schema(
                 type: Schema.Types.ObjectId,
                 ref: "Event"
             }
+        ],
+        walletId: {
+            type: String,
+            default: null
+        },
+        attachedWallets: [
+            {
+                type: String,
+                default: null
+            }
         ]
     }, {
         timestamps: true,

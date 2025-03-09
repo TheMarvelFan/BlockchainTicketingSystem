@@ -6,6 +6,7 @@ import { isValidObjectId } from "mongoose";
 import { Venue } from "../models/Venue.model.js";
 import { User } from "../models/User.model.js";
 import { Ticket } from "../models/Ticket.model.js";
+import { getWeb3, getTicketContract } from "../utils/Blockchain.js";
 
 const getAllEvents = asyncHandler(async (req, res) => {
     const {
@@ -84,8 +85,8 @@ const getEventById = asyncHandler(async (req, res) => {
 const bookEvent = asyncHandler(async (req, res) => {
     try {
         const { eventId, ticketId } = req.body;
-        const userId = req.user.id;
-        const buyerWalletId = req.user.walletAddress;
+        const userId = req.user._id;
+        const buyerWalletId = req.user.walletId;
 
         // Find the ticket
         const ticket = await Ticket.findById(ticketId);
@@ -125,8 +126,7 @@ const bookEvent = asyncHandler(async (req, res) => {
         // Update ticket in database
         ticket.sold = true;
         ticket.walletId = buyerWalletId;
-        ticket.boughtBy = userId;
-        ticket.updatedAt = Date.now();
+        ticket.boughtBy = await User.findById(userId);
 
         await ticket.save();
 
